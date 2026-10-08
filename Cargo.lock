@@ -3585,6 +3585,7 @@ dependencies = [
  "image",
  "pdfcraft-engine",
  "pdfcraft-organize",
+ "pdfcraft-platform",
  "pdfcraft-render",
  "pdfcraft-xfa",
  "png 0.18.1",
@@ -3801,6 +3802,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "pdfcraft-platform"
+version = "0.4.0"
+
+[[package]]
 name = "pdfcraft-preflight"
 version = "0.4.0"
 dependencies = [
@@ -3842,6 +3847,7 @@ dependencies = [
  "kurbo 0.13.1",
  "log",
  "lopdf",
+ "pdfcraft-fonts",
  "thiserror 2.0.21",
 ]
 
@@ -3893,10 +3899,14 @@ dependencies = [
  "image",
  "js-sys",
  "log",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
  "pdfcraft-cos",
  "pdfcraft-engine",
  "pdfcraft-fonts",
  "pdfcraft-model",
+ "pdfcraft-platform",
  "pdfcraft-render",
  "pdfcraft-xfa",
  "png 0.18.1",
