@@ -66,3 +66,7 @@
 	Couldn't import the signature image: {e}	Não foi possível importar a imagem da assinatura: {e}
 	Portable mode is off: {folder} can't be written ({error}). Settings are kept in your user folder instead.	O modo portátil está desativado: não é possível gravar em {folder} ({error}). As configurações ficam na sua pasta de usuário.
 	Go to page…	Ir para a página…
+	Reload documents when their files change on disk	Recarregar documentos quando os arquivos mudarem no disco
+	This file changed on disk. Reload it to see the new version; your unsaved changes will be lost.	Este arquivo foi alterado no disco. Recarregue-o para ver a nova versão; suas alterações não salvas serão perdidas.
+	Reload	Recarregar
+	Couldn't reload {name}: {e}	Não foi possível recarregar {name}: {e}

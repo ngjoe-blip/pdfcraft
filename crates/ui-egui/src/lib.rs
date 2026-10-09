@@ -65,6 +65,8 @@ mod bidi;
 mod dialogs;
 mod edit_text_ui;
 mod editing;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod file_watch;
 mod files;
 pub mod fill_sign;
 pub mod folders_ui;
@@ -374,6 +376,11 @@ pub struct PdfCraftApp {
     pub palette_query: String,
     pub all_tools_expanded: bool,
     pub recent: Vec<RecentFile>,
+    /// Preferences: reload a document when its file changes on disk (#431).
+    pub reload_changed_files: bool,
+    /// Open documents' files, watched for changes on disk.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) watch: file_watch::FileWatch,
     /// Folders pinned to Home, and what they held when last listed.
     pub pinned: folders_ui::PinnedFolders,
     pub toast: Option<(String, f64)>,
@@ -615,6 +622,9 @@ impl PdfCraftApp {
             palette_query: String::new(),
             all_tools_expanded: false,
             recent: Vec::new(),
+            reload_changed_files: true,
+            #[cfg(not(target_arch = "wasm32"))]
+            watch: Default::default(),
             pinned: Default::default(),
             toast: None,
             integrated_titlebar: false,
@@ -981,10 +991,17 @@ impl PdfCraftApp {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn open_path(&mut self, path: &str) {
         let name = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.to_string());
+        // Taken before reading: a build that rewrites the file meanwhile still counts as a change.
+        let stamp = file_watch::Stamp::at(path);
+        let tabs = self.views.len();
         match std::fs::read(path) {
             Ok(bytes) => {
                 if let Err(e) = self.open_bytes(&name, Some(path.to_string()), bytes) {
                     self.notify_fmt("Couldn't open {name}: {e}", &[("name", &name), ("e", &e.to_string())]);
+                } else if self.views.len() > tabs
+                    && let Some(doc) = self.views.last().map(|v| v.id)
+                {
+                    self.watch.known_as(doc, stamp);
                 }
             }
             Err(e) => self.notify_fmt("Couldn't read {name}: {e}", &[("name", &name), ("e", &e.to_string())]),
@@ -1170,6 +1187,7 @@ impl PdfCraftApp {
         let trusted: Vec<String> = self.session.trusted_certificates().iter().map(pdfcraft_engine::sign::x509::to_pem).collect();
         serde_json::json!({
             "recent": self.recent,
+            "reload_changed_files": self.reload_changed_files,
             "pinned_folders": self.pinned.folders,
             "theme": self.theme_preference,
             "default_mode": self.default_mode,
@@ -1203,6 +1221,9 @@ impl PdfCraftApp {
             #[cfg(not(target_arch = "wasm32"))]
             let r: Vec<RecentFile> = r.into_iter().filter(|f| std::path::Path::new(&f.path).exists()).collect();
             self.recent = r;
+        }
+        if let Some(on) = v["reload_changed_files"].as_bool() {
+            self.reload_changed_files = on;
         }
         self.pinned.restore(&v["pinned_folders"]);
         if let Ok(preference) = serde_json::from_value::<ThemePreference>(v["theme"].clone()) {
@@ -1635,6 +1656,9 @@ impl eframe::App for PdfCraftApp {
         self.guard_quit(ctx);
         let now = ctx.input(|i| i.time);
         self.autosave_tick(now);
+        // Reload documents whose files a build rewrote (#431).
+        #[cfg(not(target_arch = "wasm32"))]
+        self.watch_files();
         self.poll_updates();
         // Shortcuts deferred last frame: the text field has taken that frame's typing since.
         let deferred = std::mem::take(&mut self.deferred_commands);
