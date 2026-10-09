@@ -1085,7 +1085,7 @@ pub fn set_appearance(doc: &mut Document, r: ObjRef) -> Result<(), AnnotError> {
     let subtype = String::from_utf8_lossy(d.name(b"Subtype").unwrap_or_default()).into_owned();
     let Some(stream) = appearance::build(&d) else { return Err(AnnotError::Unsupported(subtype)) };
     let ap = doc.add(Object::Stream(stream));
-    let mut apd = Dict::new();
+    let mut apd = d.get(b"AP").map(|a| doc.resolve(a)).and_then(|a| a.as_dict().cloned()).unwrap_or_default();
     apd.set(b"N".to_vec(), Object::Ref(ap));
     doc.update_dict(r, |d| {
         d.set(b"AP".to_vec(), Object::Dict(apd));

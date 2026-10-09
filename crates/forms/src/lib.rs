@@ -880,6 +880,11 @@ fn set_states(doc: &mut Document, f: &Field, on: Option<&str>) -> Result<(), For
     Ok(())
 }
 
+/// Copy an existing appearance dictionary before replacing its normal appearance.
+fn appearance_dict(doc: &Document, widget: ObjRef) -> Dict {
+    doc.get(widget).as_dict().and_then(|d| d.get(b"AP").map(|a| doc.resolve(a))).and_then(|a| a.as_dict().cloned()).unwrap_or_default()
+}
+
 /// Regenerate the normal appearance of every widget of a text or choice field.
 fn redraw(doc: &mut Document, f: &Field, values: &[String], scripts: &mut dyn Scripts) -> Result<(), FormError> {
     let shown = match values {
@@ -892,7 +897,7 @@ fn redraw(doc: &mut Document, f: &Field, values: &[String], scripts: &mut dyn Sc
             None => appearance::field_appearance(doc, f, w, values),
         };
         let ap = doc.add(Object::Stream(stream));
-        let mut apd = Dict::new();
+        let mut apd = appearance_dict(doc, w.obj);
         apd.set(b"N".to_vec(), Object::Ref(ap));
         doc.update_dict(w.obj, |d| {
             d.set(b"AP".to_vec(), Object::Dict(apd));
