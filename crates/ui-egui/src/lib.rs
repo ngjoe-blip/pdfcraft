@@ -85,6 +85,19 @@ mod redact_ui;
 pub use redact_ui::{HiddenDraft, PagesDraft as RedactPagesDraft, RedactPrefs, SearchDraft as RedactSearchDraft};
 pub mod i18n;
 
+/// [`PdfCraftApp::date_text`] for callers that already borrow other parts of the app.
+pub(crate) fn date_text(session: &Session, fmt: Option<&str>) -> Result<String, String> {
+    let lang = session.date_language().unwrap_or(i18n::current().code());
+    session.today_text(fmt, Some(lang))
+}
+
+/// Today in Preferences ▸ Date format for stamping into a PDF; refused when it has characters
+/// Fill & Sign can't write yet (see [`pdfcraft_engine::dates::unwritable`]).
+pub(crate) fn date_text_for_pdf(session: &Session) -> Result<String, String> {
+    let lang = session.date_language().unwrap_or(i18n::current().code());
+    session.today_text_for_pdf(None, Some(lang))
+}
+
 /// The longest author name kept (Preferences ▸ Identity, restored settings).
 pub(crate) const MAX_AUTHOR_CHARS: usize = 200;
 pub mod portable;
@@ -351,6 +364,9 @@ pub struct PdfCraftApp {
     /// Documents and view). Continuous scrolling at fit width by default, which never snaps
     /// between pages.
     pub view_defaults: canvas::ViewDefaults,
+    /// The Preferences ▸ Date format box while it's being edited, or while it holds an invalid
+    /// pattern (the session keeps the last valid one).
+    pub date_format_draft: Option<String>,
     /// Explicit CLI/control mode lasts for this session and is never persisted.
     mode_override: Option<Mode>,
     pub left: LeftPanel,
@@ -598,6 +614,7 @@ impl PdfCraftApp {
             mode: Mode::AllTools,
             default_mode: Mode::AllTools,
             view_defaults: Default::default(),
+            date_format_draft: None,
             mode_override: None,
             left: LeftPanel::AllTools,
             left_open: true,
@@ -1153,6 +1170,12 @@ impl PdfCraftApp {
         self.notify_fmt("`{command}` {when}", &[("command", command), ("when", &when)]);
     }
 
+    /// Today in `fmt` (or Preferences ▸ Date format), with month and weekday names in the date
+    /// language, or the interface language when it follows that.
+    pub fn date_text(&self, fmt: Option<&str>) -> Result<String, String> {
+        date_text(&self.session, fmt)
+    }
+
     /// Select the workspace and its matching tool panel, just like the mode bar.
     pub(crate) fn select_mode(&mut self, mode: Mode) {
         self.mode = mode;
@@ -1177,6 +1200,9 @@ impl PdfCraftApp {
             "default_zoom": self.view_defaults.zoom_name(),
             "highlight_fields": self.view_defaults.highlight_fields,
             "language": self.language,
+            "date_format": self.session.date_format(),
+            // Null follows the interface language.
+            "date_language": self.session.date_language(),
             "author": self.comment_prefs.author,
             // Drawn signatures keep their original form (older settings read the same).
             "signature": match &self.signature { Some(fill_sign::SavedSig::Drawn(s)) => Some(s), _ => None },
@@ -1222,6 +1248,13 @@ impl PdfCraftApp {
         }
         if let Some(language) = v["language"].as_str().and_then(i18n::normalize_pref) {
             self.language = language.to_string();
+        }
+        // Settings are untrusted: an unusable pattern keeps the default.
+        if let Some(f) = v["date_format"].as_str() {
+            let _ = self.session.set_date_format(f);
+        }
+        if let Some(l) = v["date_language"].as_str() {
+            let _ = self.session.set_date_language(Some(l));
         }
         // An empty or missing name keeps the login-name default; settings are untrusted, so the
         // name is cut to a sane length.
@@ -1307,6 +1340,8 @@ impl PdfCraftApp {
             ("default-mode", _) => {
                 self.default_mode = Mode::parse(value).ok_or("default-mode must be all, read, edit, convert or sign")?;
             }
+            ("date-format", _) => self.session.set_date_format(value)?,
+            ("date-language", _) => self.session.set_date_language(Some(value).filter(|v| *v != "auto"))?,
             ("tool", _) => {
                 let g = pdfcraft_engine::catalog::group(value).ok_or_else(|| format!("unknown tool {value}"))?;
                 self.left = LeftPanel::Tool(g.id);
