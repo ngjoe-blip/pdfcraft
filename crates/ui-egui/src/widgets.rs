@@ -63,10 +63,22 @@ pub fn search_box(ui: &mut egui::Ui, placeholder: &str, width: f32) -> Response 
     let fill = if resp.hovered() { t.hover } else { t.field };
     ui.painter().rect(rect, CornerRadius::same(16), fill, Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
     icons::paint(ui, Rect::from_min_size(rect.min + vec2(10.0, 8.0), vec2(16.0, 16.0)), "search", 15.0, t.text_muted);
-    ui.painter().text(rect.left_center() + vec2(34.0, 0.0), Align2::LEFT_CENTER, placeholder, theme::regular(13.0), t.text_faint);
     let shortcut = ui.ctx().format_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::K));
-    ui.painter().text(rect.right_center() - vec2(12.0, 0.0), Align2::RIGHT_CENTER, shortcut, theme::regular(11.5), t.text_faint);
-    resp.on_hover_cursor(egui::CursorIcon::Text)
+    let (hint, shortcut) = ui.fonts_mut(|f| {
+        let shortcut = f.layout_no_wrap(shortcut, theme::regular(11.5), t.text_faint);
+        // Keep the translated hint clear of the platform's shortcut. The full label remains
+        // available to accessibility/control queries and in the hover text.
+        let hint_width = (rect.width() - 34.0 - 12.0 - 8.0 - shortcut.size().x).max(0.0);
+        let mut job = egui::text::LayoutJob::simple(placeholder.to_owned(), theme::regular(13.0), t.text_faint, hint_width);
+        job.wrap.max_rows = 1;
+        job.wrap.break_anywhere = true;
+        (f.layout_job(job), shortcut)
+    });
+    let hint_pos = rect.left_center() + vec2(34.0, -hint.size().y / 2.0);
+    let shortcut_pos = rect.right_center() - vec2(12.0 + shortcut.size().x, shortcut.size().y / 2.0);
+    ui.painter().galley(hint_pos, hint, t.text_faint);
+    ui.painter().galley(shortcut_pos, shortcut, t.text_faint);
+    resp.on_hover_text(placeholder).on_hover_cursor(egui::CursorIcon::Text)
 }
 
 pub fn menu_item(ui: &mut egui::Ui, label: &str, shortcut: &str) -> Response {

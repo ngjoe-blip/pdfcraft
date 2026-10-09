@@ -50,24 +50,40 @@ pub fn show(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                     ui.set_width(ui.available_width());
                     ui.label(egui::RichText::new(tl!("Recommended tools")).font(theme::semibold(15.0)));
                     ui.add_space(10.0);
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing = vec2(14.0, 14.0);
-                        for id in RECOMMENDED {
-                            let Some(g) = catalog::group(id) else { continue };
-                            let (rect, resp) = ui.allocate_exact_size(vec2(190.0, 104.0), Sense::click());
-                            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tl!(g.label)));
-                            let fill = if resp.hovered() { t.hover } else { t.card };
-                            ui.painter().rect(rect, CornerRadius::same(10), fill, Stroke::new(1.0, t.divider), egui::StrokeKind::Inside);
-                            let color = egui::Color32::from_rgb(g.hue[0], g.hue[1], g.hue[2]);
-                            icons::paint(ui, Rect::from_min_size(rect.min + vec2(14.0, 14.0), vec2(22.0, 22.0)), g.icon, 21.0, color);
-                            ui.painter().text(rect.min + vec2(44.0, 25.0), Align2::LEFT_CENTER, tl!(g.label), theme::semibold(13.5), t.text);
+                    // Translated titles and descriptions can take more than one line. Measure
+                    // them before allocating the cards so neither overlaps the action label.
+                    let cards: Vec<_> = RECOMMENDED
+                        .iter()
+                        .filter_map(|id| {
+                            let g = catalog::group(id)?;
                             let blurb = g
                                 .sections
                                 .first()
                                 .map(|s| s.items.iter().take(3).map(|i| tl!(i.label)).collect::<Vec<_>>().join(" · "))
                                 .unwrap_or_default();
-                            let galley = ui.fonts_mut(|f| f.layout(blurb, theme::regular(11.5), t.text_muted, rect.width() - 28.0));
-                            ui.painter().galley(rect.min + vec2(14.0, 46.0), galley, t.text_muted);
+                            let (title, blurb) = ui.fonts_mut(|f| {
+                                (
+                                    f.layout(tl!(g.label).to_owned(), theme::semibold(13.5), t.text, 132.0),
+                                    f.layout(blurb, theme::regular(11.5), t.text_muted, 162.0),
+                                )
+                            });
+                            let blurb_top = 14.0 + title.size().y.max(22.0) + 10.0;
+                            Some((g, title, blurb, blurb_top))
+                        })
+                        .collect();
+                    let card_height = cards.iter().fold(104.0_f32, |height, (_, _, blurb, top)| height.max(top + blurb.size().y + 32.0));
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = vec2(14.0, 14.0);
+                        for (g, title, blurb, blurb_top) in cards {
+                            let (rect, resp) = ui.allocate_exact_size(vec2(190.0, card_height), Sense::click());
+                            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tl!(g.label)));
+                            let fill = if resp.hovered() { t.hover } else { t.card };
+                            ui.painter().rect(rect, CornerRadius::same(10), fill, Stroke::new(1.0, t.divider), egui::StrokeKind::Inside);
+                            let color = egui::Color32::from_rgb(g.hue[0], g.hue[1], g.hue[2]);
+                            icons::paint(ui, Rect::from_min_size(rect.min + vec2(14.0, 14.0), vec2(22.0, 22.0)), g.icon, 21.0, color);
+                            let title_top = 14.0 + (22.0 - title.size().y).max(0.0) / 2.0;
+                            ui.painter().galley(rect.min + vec2(44.0, title_top), title, t.text);
+                            ui.painter().galley(rect.min + vec2(14.0, blurb_top), blurb, t.text_muted);
                             ui.painter().text(
                                 rect.left_bottom() + vec2(14.0, -14.0),
                                 Align2::LEFT_CENTER,
@@ -80,7 +96,7 @@ pub fn show(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                                 app.left_open = true;
                             }
                         }
-                        let (rect, resp) = ui.allocate_exact_size(vec2(170.0, 104.0), Sense::click());
+                        let (rect, resp) = ui.allocate_exact_size(vec2(170.0, card_height), Sense::click());
                         resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tl!("Open file")));
                         ui.painter().rect(
                             rect,
