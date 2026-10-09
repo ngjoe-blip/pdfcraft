@@ -125,6 +125,7 @@ M0 → M1 → M2 → M3 → M4 must happen in order. After M4, M5–M12 can run 
 
 ## Log
 
+- **2026-10-09 (page preview resolution):** The page view draws whole pages at twice the screen density when that bitmap still fits, then filters it down, so type and fine lines keep more detail. Print preview, page thumbnails, alternate-text figures and the page behind a moving signature are rendered at the size they are shown instead of being stretched up from a small image. Milestone and effort estimates unchanged.
 - **2026-10-09 (M5.7, #434 partial):** Natural-size image stamps placed at a click or through `stamp_custom` remain upright on rotated pages, with a displayed-space-sized rectangle and a counterrotated standard appearance matrix. Move, resize, restyle and undo/redo preserve that orientation. Native and external Poppler save/reopen rendering cover all four quarter-turns; UI tests verify the displayed bounds. Explicit rectangle placement, image signatures, PDF-page stamps and image-file orientation metadata remain outside this repair. #434 stays open; milestone table and effort estimates remain unchanged.
 - **2026-10-09 (M1, raw-stream decoding limits):** COS checks unfiltered decoded data against the caller and per-stream limits before copying it, including empty filter arrays and streams whose Crypt filter was applied on load. Strict decoding uses the same raw-data guard. Tiny synthetic regressions cover exceeded, exact and zero-byte limits while retaining the filtered decoder behavior. Milestone and overall effort estimates unchanged (about 30–35%).
 

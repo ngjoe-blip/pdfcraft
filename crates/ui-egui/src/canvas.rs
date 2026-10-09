@@ -27,10 +27,17 @@ const TEXT_TAG: u64 = 1 << 62;
 const STALE_TAG: u64 = u64::MAX;
 /// Pages whose raster would exceed this many device pixels on a side are drawn in tiles.
 const TILE_THRESHOLD: f32 = 4096.0;
+/// A whole-page raster may be drawn at twice the screen density up to this side, then filtered
+/// down into the page rectangle. Past it the page stays one screen pixel per sample (or tiles).
+const SUPERSAMPLE_LIMIT: f32 = 8192.0;
 const TILE: u32 = 1024;
-/// Longest side of the low-resolution backdrop drawn under tiles.
-const BASE_SIDE: f32 = 2048.0;
-const THUMB_W: f32 = 132.0;
+/// Longest side of the backdrop drawn under tiles, and of a live page preview (signature drag).
+pub(crate) const BASE_SIDE: f32 = 4096.0;
+/// Thumbnail width in logical points. The pages panel draws at most 150 and the organize grid
+/// about 146; the extra pixels are sampled down so the image stays sharp on a high-dpi screen.
+const THUMB_W: f32 = 240.0;
+/// Print-preview rasters (distinct from the small thumbnails the panels keep).
+const PRINT_TAG: u64 = 1 << 61;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Fit {
@@ -215,6 +222,8 @@ pub struct DocView {
     thumbs: HashMap<usize, TextureHandle>,
     /// Thumbnails that are out of date (still shown until their replacement arrives).
     stale_thumbs: HashSet<usize>,
+    /// Print dialog: the current sheet's pages at the preview pane's device resolution.
+    print_pages: HashMap<usize, (u64, TextureHandle)>,
     /// Sharp tiles of large pages: (page, tile x, tile y) → (scale tag, texture).
     tiles: HashMap<(usize, u32, u32), (u64, TextureHandle)>,
     /// Text layers, extracted in the background on demand (selection, find, copy).
@@ -360,6 +369,7 @@ impl DocView {
             waiting_since: HashMap::new(),
             thumbs: HashMap::new(),
             stale_thumbs: HashSet::new(),
+            print_pages: HashMap::new(),
             tiles: HashMap::new(),
             texts: HashMap::new(),
             text_failed: HashSet::new(),
@@ -481,6 +491,9 @@ impl DocView {
             p.tag = STALE_TAG;
         }
         self.stale_thumbs.extend(self.thumbs.keys().copied());
+        for slot in self.print_pages.values_mut() {
+            slot.0 = STALE_TAG;
+        }
         self.tiles.clear();
         self.texts.clear();
         self.text_failed.clear();
@@ -502,6 +515,9 @@ impl DocView {
         }
         if self.thumbs.contains_key(&page) {
             self.stale_thumbs.insert(page);
+        }
+        if let Some(slot) = self.print_pages.get_mut(&page) {
+            slot.0 = STALE_TAG;
         }
         self.tiles.retain(|(p, _, _), _| *p != page);
         self.texts.remove(&page);
@@ -536,9 +552,15 @@ impl DocView {
         (!quads.is_empty()).then_some((s.page, quads))
     }
 
-    /// A page's thumbnail texture, when rendered (the print preview uses them).
+    /// A page's thumbnail texture, when rendered.
     pub(crate) fn thumb_id(&self, page: usize) -> Option<egui::TextureId> {
         self.thumbs.get(&page).map(|t| t.id())
+    }
+
+    /// The print preview's picture of `page`: the sheet raster when it has arrived, otherwise the
+    /// thumbnail.
+    pub(crate) fn page_preview(&self, page: usize) -> Option<egui::TextureId> {
+        self.print_pages.get(&page).map(|(_, tex)| tex.id()).or_else(|| self.thumb_id(page))
     }
 
     pub(crate) fn page_text(&self, page: usize) -> Option<Arc<PageText>> {
@@ -879,7 +901,10 @@ impl DocView {
                 self.tiles.insert((page, t.x / TILE, t.y / TILE), (r.request.tag, tex));
                 continue;
             }
-            if r.request.tag & THUMB_TAG != 0 {
+            if r.request.tag & PRINT_TAG != 0 {
+                let tex = ctx.load_texture(format!("print-{:?}-{page}", self.id), img, TextureOptions::LINEAR);
+                self.print_pages.insert(page, (r.request.tag, tex));
+            } else if r.request.tag & THUMB_TAG != 0 {
                 let tex = ctx.load_texture(format!("thumb-{:?}-{page}", self.id), img, TextureOptions::LINEAR);
                 self.thumbs.insert(page, tex);
                 self.stale_thumbs.remove(&page);
@@ -957,8 +982,8 @@ impl DocView {
     }
 
     fn render_scale(&self, ppp: f32) -> f32 {
-        // Exactly the device scale: a raster at any other scale is resampled on screen, which
-        // blurs every line and glyph (#260).
+        // Screen pixels per PDF point. A whole-page raster may be drawn at twice this and filtered
+        // down ([`whole_page_scale`]). Any other scale is resampled and looks soft (#260).
         self.zoom * PT * ppp
     }
 }
@@ -966,6 +991,37 @@ impl DocView {
 /// The request tag for a raster at `scale`: equal tags mean the same scale (to 1/65536).
 fn scale_tag(scale: f32) -> u64 {
     (f64::from(scale) * 65536.0).round() as u64
+}
+
+/// Scale for a whole-page raster. Twice the screen density when the bitmap still fits in
+/// 8192 px on its long side; otherwise exactly the screen density, so it maps texel for texel.
+pub fn whole_page_scale(device: f32, long_pt: f32) -> f32 {
+    let sharp = device * 2.0;
+    if long_pt.max(1.0) * sharp <= SUPERSAMPLE_LIMIT { sharp } else { device }
+}
+
+/// Device pixels per PDF point for a thumbnail of the widest page.
+fn thumb_scale(max_width_pt: f32, ppp: f32) -> f32 {
+    THUMB_W * ppp.max(1.0) / max_width_pt.max(1.0)
+}
+
+/// Queue sharp rasters for the print preview. An empty `pages` drops the cache (the dialog closed).
+fn queue_print_previews(view: &mut DocView, pages: &[(usize, f32)], queue: &mut Vec<RenderRequest>) {
+    if pages.is_empty() {
+        view.print_pages.clear();
+        return;
+    }
+    view.print_pages.retain(|page, _| pages.iter().any(|(p, _)| p == page));
+    for &(page, scale) in pages {
+        if view.errors.contains_key(&page) {
+            continue;
+        }
+        let tag = scale_tag(scale) | PRINT_TAG;
+        let fresh = view.print_pages.get(&page).is_some_and(|(have, _)| *have == tag);
+        if !fresh {
+            queue.push(RenderRequest { page, kind: RequestKind::Pixels, tile: None, scale, tag });
+        }
+    }
 }
 
 /// `r` moved so its corner lies on a whole physical pixel, so that a raster drawn from there
@@ -1202,6 +1258,13 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
         return;
     }
     let want_thumbs = app.right == Some(RightPanel::Pages) || app.views[index].organize || app.dialog == Some(crate::Dialog::Print);
+    let print_rasters = if app.dialog == Some(crate::Dialog::Print) {
+        let sizes: Vec<(f64, f64)> = info.pages.iter().map(|p| (p.width as f64, p.height as f64)).collect();
+        let labels: Vec<String> = info.pages.iter().map(|p| p.label.clone()).collect();
+        crate::print_ui::preview_rasters(&app.print_draft, &sizes, &labels, ui.ctx().pixels_per_point())
+    } else {
+        Vec::new()
+    };
     // The Prepare a form panel is open (or a field tool is picked): fields are edited, not filled.
     let preparing = app.is_preparing();
     // Edit a PDF: added text and images can be selected, moved and edited.
@@ -1221,7 +1284,7 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
     // No dialog, close prompt or palette over the page: only then does page input count.
     let unobstructed = app.dialog.is_none() && app.close_request.is_none() && !app.palette_open;
     if view.organize {
-        organize_grid(view, info, &doc.renderer, doc.allows_assembly(), doc.dirty, unobstructed, ui, &t);
+        organize_grid(view, info, &doc.renderer, doc.allows_assembly(), doc.dirty, unobstructed, &print_rasters, ui, &t);
         return;
     }
 
@@ -1456,19 +1519,22 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
             } else {
                 let (pw_pt, ph_pt) = (info.pages[i].width.max(1.0), info.pages[i].height.max(1.0));
                 let tiled = pw_pt.max(ph_pt) * scale > TILE_THRESHOLD;
-                // Whole-page raster: sharp when small, a low-res backdrop when tiled.
+                // Whole-page raster: above screen density when it fits, a backdrop when tiled.
+                let page_scale = whole_page_scale(scale, pw_pt.max(ph_pt));
+                let supersampled = !tiled && page_scale > scale;
                 let (want_scale, want_tag) = if tiled {
                     let bs = BASE_SIDE / pw_pt.max(ph_pt);
                     (bs, scale_tag(bs))
                 } else {
-                    (scale, tag)
+                    (page_scale, scale_tag(page_scale))
                 };
                 match view.pages.get(&i) {
                     Some(p) => {
-                        if !tiled && p.tag == want_tag {
+                        if !tiled && p.tag == want_tag && !supersampled {
                             xf.texel_aligned(p.tex.size(), ppp).paint_image(painter, p.tex.id(), 0.0, 0.0, 1.0, 1.0);
                         } else {
-                            // A backdrop, or a raster at an older scale until the new one arrives.
+                            // Supersampled (filtered down into the page), a backdrop, or a raster
+                            // at an older scale until the new one arrives.
                             xf.paint_image(painter, p.tex.id(), 0.0, 0.0, 1.0, 1.0);
                         }
                         if p.tag != want_tag {
@@ -1911,10 +1977,10 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
 
     view.auto_scroll.paint(ui, avail);
 
-    // Bound texture memory: keep sharp rasters only near the current page.
-    if view.pages.len() > 24 {
+    // Bound texture memory. Supersampled pages are several times larger, so only a few stay.
+    if view.pages.len() > 8 {
         let cur = view.current;
-        view.pages.retain(|&p, _| p.abs_diff(cur) <= 8);
+        view.pages.retain(|&p, _| p.abs_diff(cur) <= 2);
     }
     // Schedule renders: visible pages first (nearest the current page), then thumbnails.
     let (mut wanted, visible_now) = out.inner;
@@ -1934,8 +2000,9 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
         text_pages.extend(rest);
     }
     queue.extend(text_pages.into_iter().map(|page| RenderRequest { page, kind: RequestKind::Text, tile: None, scale: 1.0, tag: TEXT_TAG }));
+    queue_print_previews(view, &print_rasters, &mut queue);
     if want_thumbs {
-        let s = THUMB_W * ppp / info.pages.iter().map(|p| p.width).fold(1.0, f32::max);
+        let s = thumb_scale(info.pages.iter().map(|p| p.width).fold(1.0, f32::max), ppp);
         for page in 0..info.pages.len() {
             if (!view.thumbs.contains_key(&page) || view.stale_thumbs.contains(&page)) && !view.errors.contains_key(&page) {
                 queue.push(RenderRequest { page, kind: RequestKind::Pixels, tile: None, scale: s, tag: THUMB_TAG });
@@ -2710,6 +2777,7 @@ fn organize_grid(
     editable: bool,
     dirty: bool,
     auto_scroll_enabled: bool,
+    print_rasters: &[(usize, f32)],
     ui: &mut egui::Ui,
     t: &Tokens,
 ) {
@@ -2885,11 +2953,12 @@ fn organize_grid(
         }
     }
     view.auto_scroll.paint(ui, viewport);
-    let s = THUMB_W * ppp / info.pages.iter().map(|p| p.width).fold(1.0, f32::max);
-    let queue: Vec<RenderRequest> = (0..info.pages.len())
+    let s = thumb_scale(info.pages.iter().map(|p| p.width).fold(1.0, f32::max), ppp);
+    let mut queue: Vec<RenderRequest> = (0..info.pages.len())
         .filter(|p| (!view.thumbs.contains_key(p) || view.stale_thumbs.contains(p)) && !view.errors.contains_key(p))
         .map(|page| RenderRequest { page, kind: RequestKind::Pixels, tile: None, scale: s, tag: THUMB_TAG })
         .collect();
+    queue_print_previews(view, print_rasters, &mut queue);
     if queue != view.last_queue {
         pool.set_queue(queue.clone());
         view.last_queue = queue;
@@ -2917,6 +2986,14 @@ mod tests {
     /// One mouse-wheel notch (a line) at `at` seconds.
     fn notch(v: &mut DocView, dy: f32, at: f64) -> bool {
         v.single_page_wheel(egui::MouseWheelUnit::Line, dy, egui::TouchPhase::Move, at, true)
+    }
+
+    #[test]
+    fn thumbnails_cover_the_panel_on_a_high_dpi_screen() {
+        // Pages panel slot is at most 150 logical points. At 2 px/pt a letter page's thumbnail
+        // must be at least that wide, so the panel samples it down instead of stretching it.
+        let scale = thumb_scale(612.0, 2.0);
+        assert!(612.0 * scale >= 150.0 * 2.0, "{scale}");
     }
 
     #[test]

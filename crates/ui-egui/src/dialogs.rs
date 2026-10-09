@@ -774,9 +774,9 @@ pub fn show(app: &mut PdfCraftApp, ctx: &egui::Context) {
                 let Some(doc) = app.session.get(id) else { return };
                 let sizes: Vec<(f64, f64)> = doc.info.pages.iter().map(|p| (p.width as f64, p.height as f64)).collect();
                 let labels: Vec<String> = doc.info.pages.iter().map(|p| p.label.clone()).collect();
-                let thumbs: std::collections::HashMap<usize, egui::TextureId> =
-                    (0..sizes.len()).filter_map(|p| app.views[i].thumb_id(p).map(|t| (p, t))).collect();
-                let (go, cancel) = crate::print_ui::body(ui, &mut app.print_draft, &t, &sizes, &labels, &|p| thumbs.get(&p).copied());
+                let previews: std::collections::HashMap<usize, egui::TextureId> =
+                    (0..sizes.len()).filter_map(|p| app.views[i].page_preview(p).map(|t| (p, t))).collect();
+                let (go, cancel) = crate::print_ui::body(ui, &mut app.print_draft, &t, &sizes, &labels, &|p| previews.get(&p).copied());
                 print_go = go;
                 close = go || cancel;
                 return;
