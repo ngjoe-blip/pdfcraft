@@ -1968,3 +1968,7 @@
 	Choose a PNG or JPEG image (up to 4 MiB). Transparency is preserved.	選擇 PNG 或 JPEG 圖像（最大 4 MiB）。透明度會保留。
 	Couldn't import the signature image: {e}	無法匯入簽名圖像：{e}
 	Go to page…	轉到頁面…
+	Reload documents when their files change on disk	檔案在磁碟上變更時重新載入對應的文件
+	This file changed on disk. Reload it to see the new version; your unsaved changes will be lost.	此檔案已在磁碟上變更。請重新載入以查看新版本；未儲存的變更將會遺失。
+	Reload	重新載入
+	Couldn't reload {name}: {e}	無法重新載入{name}：{e}
