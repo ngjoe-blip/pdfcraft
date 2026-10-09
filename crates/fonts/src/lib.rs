@@ -90,6 +90,16 @@ pub fn win_ansi(s: &str) -> Vec<u8> {
         .collect()
 }
 
+/// Whether [`win_ansi`] keeps `c` rather than writing `?` (a tab becomes a space).
+pub fn win_ansi_encodable(c: char) -> bool {
+    c == '?' || win_ansi(c.encode_utf8(&mut [0; 4])) != b"?"
+}
+
+/// The first character of `s` that [`win_ansi`] can't encode and would write as `?`.
+pub fn first_non_win_ansi(s: &str) -> Option<char> {
+    s.chars().find(|c| !win_ansi_encodable(*c))
+}
+
 /// Bytes as a PDF literal string, `(` … `)`, with delimiters escaped.
 pub fn literal(bytes: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(bytes.len() + 2);
@@ -109,6 +119,18 @@ pub fn literal(bytes: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn win_ansi_encodability_matches_the_encoder() {
+        for c in ['a', 'é', 'ÿ', '€', '—', '™', '\t', '?'] {
+            assert!(win_ansi_encodable(c), "{c:?}");
+        }
+        for c in ['中', 'あ', 'Ω', 'č', 'ă', '☃', '😀'] {
+            assert!(!win_ansi_encodable(c), "{c:?}");
+        }
+        assert_eq!(first_non_win_ansi("Café — 5€"), None);
+        assert_eq!(first_non_win_ansi("Dvořák"), Some('ř'));
+    }
 
     #[test]
     fn widths_wrap_and_encode() {
