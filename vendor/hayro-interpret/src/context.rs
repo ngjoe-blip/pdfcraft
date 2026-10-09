@@ -103,6 +103,7 @@ impl<'a> Context<'a> {
         let state = State::new(initial_transform);
         // PdfCraft patch: a page (or other top-level content) starts with a fresh budget.
         NESTED_PAINTS.with(|n| n.set(0));
+        crate::encode::reset_mesh_budget();
 
         Self::new_with(initial_transform, bbox, cache, xref, settings, state, 0)
     }
