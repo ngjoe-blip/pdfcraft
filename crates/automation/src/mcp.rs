@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 use crate::{Automation, Content, ToolError};
 
 /// Protocol revisions we speak, newest first.
-pub const PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
+pub const PROTOCOL_VERSIONS: &[&str] = &["2026-07-28", "2025-06-18", "2025-03-26", "2024-11-05"];
 
 const PARSE_ERROR: i64 = -32700;
 const INVALID_REQUEST: i64 = -32600;
@@ -29,15 +29,32 @@ const INVALID_PARAMS: i64 = -32602;
 const INSTRUCTIONS: &str = "PdfCraft edits PDFs. Open a file with doc_open to get a document id, then inspect \
 (doc_info, text_extract, text_find, page_render) or edit it (page_*, doc_set_info). Edits are undoable \
 (edit_undo) and stay in memory until doc_save. Page numbers are 1-based. Open documents are also \
-resources: pdfcraft://doc/{doc}/info, /text, /page/{page}/text and /page/{page}/image.";
+resources: pdfcraft://doc/{doc}/info, /text, /page/{page}/text and /page/{page}/image. \
+command_list discovers command ids and tool schemas; command_run executes one, command_batch runs several. \
+doc_inspect returns open document state; render_preview returns a bounded PNG.";
 
 /// Appended to the instructions in compact mode.
 const COMPACT_INSTRUCTIONS: &str = " Only a core set of tools is listed. Every other tool is still available: find it with \
 tool_search (optional query and category, or name for its full input schema) and run it with tool_call.";
 
 /// The tools `tools/list` returns in compact mode, besides the two meta tools.
-pub const COMPACT_CORE_TOOLS: &[&str] =
-    &["doc_open", "doc_info", "doc_save", "doc_close", "page_render", "text_extract", "text_find", "doc_combine", "doc_split", "edit_undo"];
+pub const COMPACT_CORE_TOOLS: &[&str] = &[
+    "doc_open",
+    "doc_info",
+    "doc_save",
+    "doc_close",
+    "page_render",
+    "text_extract",
+    "text_find",
+    "doc_combine",
+    "doc_split",
+    "edit_undo",
+    "command_list",
+    "command_run",
+    "command_batch",
+    "doc_inspect",
+    "render_preview",
+];
 
 /// Meta tools that exist only in compact mode.
 const TOOL_SEARCH: &str = "tool_search";
@@ -46,11 +63,12 @@ const TOOL_CALL: &str = "tool_call";
 pub struct McpServer {
     automation: Automation,
     compact: bool,
+    modern: bool,
 }
 
 impl McpServer {
     pub fn new(automation: Automation) -> Self {
-        Self { automation, compact: false }
+        Self { automation, compact: false, modern: false }
     }
 
     /// In compact mode `tools/list` returns only [`COMPACT_CORE_TOOLS`] plus `tool_search` and
@@ -99,8 +117,24 @@ impl McpServer {
         };
         let params = obj.get("params").cloned().unwrap_or(Value::Null);
         let id = id?; // notifications/initialized, notifications/cancelled, …: nothing to answer
-        Some(match self.dispatch(method, &params) {
-            Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+        let result = if method == "tools/call" { guarded_tool(|| self.dispatch(method, &params)) } else { self.dispatch(method, &params) };
+        Some(match result {
+            Ok(mut result) => {
+                let modern = params
+                    .get("_meta")
+                    .and_then(|m| m.get("io.modelcontextprotocol/protocolVersion"))
+                    .and_then(Value::as_str)
+                    .map_or(self.modern, |v| v == "2026-07-28");
+                if modern
+                    && matches!(method, "tools/list" | "resources/list" | "resources/templates/list" | "resources/read")
+                    && let Some(object) = result.as_object_mut()
+                {
+                    object.insert("resultType".into(), json!("complete"));
+                    object.insert("ttlMs".into(), json!(if matches!(method, "resources/read" | "resources/list") { 0 } else { 600_000 }));
+                    object.insert("cacheScope".into(), json!("private"));
+                }
+                json!({ "jsonrpc": "2.0", "id": id, "result": result })
+            }
             Err((code, message)) => error(id, code, &message),
         })
     }
@@ -109,7 +143,8 @@ impl McpServer {
         match method {
             "initialize" => {
                 let asked = params.get("protocolVersion").and_then(Value::as_str);
-                let version = asked.filter(|v| PROTOCOL_VERSIONS.contains(v)).unwrap_or(PROTOCOL_VERSIONS[0]);
+                let version = asked.filter(|v| PROTOCOL_VERSIONS.contains(v)).unwrap_or("2025-06-18");
+                self.modern = version == "2026-07-28";
                 Ok(json!({
                     "protocolVersion": version,
                     "capabilities": { "tools": { "listChanged": false }, "resources": { "listChanged": false, "subscribe": false } },
@@ -123,24 +158,35 @@ impl McpServer {
                 let name = params.get("name").and_then(Value::as_str).ok_or((INVALID_PARAMS, "tools/call needs a tool name".to_string()))?;
                 let args = params.get("arguments").cloned().unwrap_or(Value::Null);
                 if self.compact && name == TOOL_SEARCH {
+                    check_keys(name, &args, &["query", "category", "name"]).map_err(|e| (INVALID_PARAMS, e))?;
                     return Ok(match search_tools(&args) {
                         Ok(found) => call_result(vec![Content::Json(found)]),
                         Err(message) => tool_error(&message),
                     });
                 }
                 if self.compact && name == TOOL_CALL {
+                    check_keys(name, &args, &["name", "arguments"]).map_err(|e| (INVALID_PARAMS, e))?;
                     let (inner, inner_args) = match unwrap_tool_call(&args) {
                         Ok(pair) => pair,
                         Err(message) => return Ok(tool_error(&message)),
                     };
                     return Ok(match self.automation.call(&inner, &inner_args) {
-                        Ok(content) => call_result(content),
+                        Ok(content) => tool_content(&inner, content),
                         Err(ToolError::UnknownTool(t)) => tool_error(&format!("unknown tool {t:?}; use tool_search to find the right name")),
                         Err(e) => tool_error(&e.to_string()),
                     });
                 }
+                if let Some(def) = crate::tools::find(name) {
+                    let keys: Vec<&str> = def
+                        .input_schema
+                        .get("properties")
+                        .and_then(Value::as_object)
+                        .map(|p| p.keys().map(String::as_str).collect())
+                        .unwrap_or_default();
+                    check_keys(name, &args, &keys).map_err(|e| (INVALID_PARAMS, e))?;
+                }
                 match self.automation.call(name, &args) {
-                    Ok(content) => Ok(call_result(content)),
+                    Ok(content) => Ok(tool_content(name, content)),
                     Err(ToolError::UnknownTool(t)) => Err((INVALID_PARAMS, format!("unknown tool {t:?}"))),
                     Err(e) => Ok(tool_error(&e.to_string())),
                 }
@@ -188,7 +234,7 @@ fn meta_tools() -> [Value; 2] {
                 "required": [],
                 "additionalProperties": false,
             },
-            "annotations": { "title": "Find PdfCraft tools", "readOnlyHint": true, "destructiveHint": false, "openWorldHint": false },
+            "annotations": { "title": "Find PdfCraft tools", "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false },
         }),
         json!({
             "name": TOOL_CALL,
@@ -204,7 +250,7 @@ fn meta_tools() -> [Value; 2] {
                 "required": ["name"],
                 "additionalProperties": false,
             },
-            "annotations": { "title": "Run any PdfCraft tool", "readOnlyHint": false, "destructiveHint": true, "openWorldHint": false },
+            "annotations": { "title": "Run any PdfCraft tool", "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": false },
         }),
     ]
 }
@@ -294,6 +340,24 @@ fn unwrap_tool_call(args: &Value) -> Result<(String, Value), String> {
     Ok((name.to_owned(), inner))
 }
 
+/// Last-resort boundary shared by every tools/call route, including compact dispatch.
+fn guarded_tool(f: impl FnOnce() -> Result<Value, (i64, String)>) -> Result<Value, (i64, String)> {
+    pdfcraft_engine::guard(f).unwrap_or_else(|message| Ok(tool_error(&format!("internal error: {message}"))))
+}
+
+fn tool_content(name: &str, content: Vec<Content>) -> Value {
+    let failed = name == "command_batch"
+        && content.iter().any(|c| match c {
+            Content::Json(v) => v.get("failed").and_then(Value::as_u64).is_some_and(|n| n > 0),
+            _ => false,
+        });
+    let mut result = call_result(content);
+    if let Some(object) = result.as_object_mut() {
+        object.insert("isError".into(), json!(failed));
+    }
+    result
+}
+
 /// A failed tool call, as the agent should read it.
 fn tool_error(message: &str) -> Value {
     json!({ "content": [{ "type": "text", "text": message }], "isError": true })
@@ -357,10 +421,29 @@ impl McpServer {
                 }
             }
         }
+        out.extend([
+            json!({"uri":"pdfcraft://document","name":"Open documents","mimeType":"application/json","description":"Session document state, as doc_inspect without arguments."}),
+            json!({"uri":"pdfcraft://commands","name":"Command catalog","mimeType":"application/json","description":"Commands and mapped tool schemas, as command_list without arguments."}),
+        ]);
         out
     }
 
     fn read_resource(&mut self, uri: &str) -> Result<Value, (i64, String)> {
+        if let Some(tool) = match uri {
+            "pdfcraft://document" => Some("doc_inspect"),
+            "pdfcraft://commands" => Some("command_list"),
+            _ => None,
+        } {
+            let content = self.automation.call(tool, &json!({})).map_err(|e| (INVALID_PARAMS, e.to_string()))?;
+            let value = content
+                .into_iter()
+                .find_map(|c| match c {
+                    Content::Json(v) => Some(v),
+                    _ => None,
+                })
+                .ok_or((INVALID_PARAMS, "resource returned no JSON".into()))?;
+            return Ok(json!({"uri":uri,"mimeType":"application/json","text":value.to_string()}));
+        }
         let r = parse_uri(uri).ok_or((INVALID_PARAMS, format!("unknown resource {uri:?}")))?;
         let call = |a: &mut Automation, tool: &str, args: Value| a.call(tool, &args).map_err(|e| (INVALID_PARAMS, e.to_string()));
         let json_of = |c: Vec<Content>| c.into_iter().find_map(|c| if let Content::Json(v) = c { Some(v) } else { None }).unwrap_or(Value::Null);
@@ -413,7 +496,7 @@ fn tool_json(t: &crate::ToolDef) -> Value {
         "title": t.title,
         "description": t.description,
         "inputSchema": t.input_schema,
-        "annotations": { "title": t.title, "readOnlyHint": t.read_only, "destructiveHint": t.destructive, "openWorldHint": false },
+        "annotations": { "title": t.title, "readOnlyHint": t.read_only, "destructiveHint": t.destructive, "idempotentHint": t.read_only || matches!(t.name, "doc_save" | "doc_optimize" | "doc_export_data" | "measure_export" | "doc_export_images" | "doc_export_office" | "doc_export_all_images" | "doc_export_text" | "image_save"), "openWorldHint": false },
     })
 }
 
@@ -444,6 +527,15 @@ fn call_result(content: Vec<Content>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::{Resource, first_sentence, parse_uri};
+
+    #[test]
+    fn conventions_panic_is_a_tool_error() {
+        let r = super::guarded_tool(|| panic!("synthetic tool failure")).unwrap();
+        assert_eq!(r["isError"], true);
+        assert!(r["content"][0]["text"].as_str().unwrap().contains("synthetic tool failure"));
+        let next = super::guarded_tool(|| Ok(serde_json::json!({"ok":true}))).unwrap();
+        assert_eq!(next["ok"], true);
+    }
 
     #[test]
     fn first_sentence_skips_abbreviations() {
