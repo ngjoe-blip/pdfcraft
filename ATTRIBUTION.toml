@@ -110,6 +110,17 @@ usage = "Russian UI strings, compiled in by crates/ui-egui/src/i18n/mod.rs"
 sha256 = "259f795a3cdc032aa670693d2ebff010c5dd3bcf57dda11548d5bd46e78969b8"
 
 [[asset]]
+path = "crates/ui-egui/src/i18n/hu.tsv"
+title = "Hungarian interface translation catalog"
+author = "PdfCraft contributors"
+source = "Contributor-original: clean-room translations of PdfCraft's English UI labels, no proprietary localisation resources"
+licence = "MIT OR Apache-2.0"
+licence_file = "LICENSE-MIT"
+kind = "translation"
+usage = "Hungarian UI strings, compiled in by crates/ui-egui/src/i18n/mod.rs"
+sha256 = "ec962852ad41003cf7992f3adf0448fbc3514a3b74b38e2a875a0bb07e5446f9"
+
+[[asset]]
 path = "crates/ui-egui/src/i18n/bg.tsv"
 title = "Bulgarian interface translation catalog"
 author = "PdfCraft contributors"
